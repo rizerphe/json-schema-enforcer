@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "json-schema-enforcer"
+version = "0.1.0"
+description = "A progressive JSON schema validator"
+authors = ["rizerphe <44440399+rizerphe@users.noreply.github.com>"]
+readme = "README.md"
+packages = [{include = "json_schema_enforcer"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
