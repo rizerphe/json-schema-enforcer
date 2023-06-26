@@ -199,6 +199,18 @@ class NumberSchemaParser(JsonSchemaParser):
                 return True
         return False
 
+    def allowed_negative(self) -> bool:
+        """Check whether negative numbers are allowed at all"""
+        if self.minimum is None:
+            return True
+        return self.minimum < 0
+
+    def allowed_positive(self) -> bool:
+        """Check whether positive numbers are allowed at all"""
+        if self.maximum is None:
+            return True
+        return self.maximum > 0
+
     @classmethod
     def load(
         cls, schema: dict, _recursive_parsers: list[Type[JsonSchemaParser]]
@@ -215,6 +227,11 @@ class NumberSchemaParser(JsonSchemaParser):
 
     def partial_validate(self, string_segment: str) -> tuple[bool, bool]:
         is_negative = string_segment.startswith("-")
+        if not is_negative and not self.allowed_positive():
+            return (False, False)
+        if is_negative and not self.allowed_negative():
+            return (False, False)
+
         number = float(string_segment)
         valid_full = True
 
@@ -246,7 +263,7 @@ class NumberSchemaParser(JsonSchemaParser):
     ) -> ValidationResult:
         # I'm going to restrict scientific notation for now because it's a pain
         if data[start_index:] == "-":
-            return ValidationResult(True, None)
+            return ValidationResult(self.allowed_negative(), None)
         regex = r"-?([1-9][0-9]*|0)(\.[0-9]*)?"
         match = re.match(regex, data[start_index:])
         if not match:
