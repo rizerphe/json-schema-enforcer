@@ -5,7 +5,18 @@ from dataclasses import dataclass
 import json
 import math
 import re
-from typing import Iterator, Type
+from typing import Iterator, Literal, Type
+
+
+@dataclass
+class StyleConfig:
+    """The configuration for the style of the schema"""
+
+    force_instant_comma: bool = True
+    indent: int | None = 4
+    compact_objects: bool = True
+    max_inline_array_elements: int | None = 5
+    object_multiline_treshold: int | None = 2
 
 
 @dataclass
@@ -32,12 +43,20 @@ class JsonSchemaParser(ABC):
         """
 
     @abstractmethod
-    def validate(self, data: str, start_index: int = 0) -> ValidationResult:
+    def validate(
+        self,
+        data: str,
+        start_index: int = 0,
+        indent_level: int = 0,
+        style_config: StyleConfig | None = None,
+    ) -> ValidationResult:
         """Validate the data against the schema
 
         Args:
             data: The data to validate
             start_index: The index the object starts at
+            indent_level: The level of indentation of the current object
+            style_config: The configuration for the style of the schema
         """
 
     @classmethod
@@ -63,7 +82,13 @@ class LiteralValueSchemaParser(JsonSchemaParser):
             return cls()
         return None
 
-    def validate(self, data: str, start_index: int = 0) -> ValidationResult:
+    def validate(
+        self,
+        data: str,
+        start_index: int = 0,
+        _indent_level: int = 0,
+        _style_config: StyleConfig | None = None,
+    ) -> ValidationResult:
         for literal_value in ("true", "false", "null"):
             parsed = data[start_index:]
             if parsed.startswith(literal_value, start_index):
@@ -86,7 +111,13 @@ class IntegerSchemaParser(JsonSchemaParser):
             return cls()
         return None
 
-    def validate(self, data: str, start_index: int = 0) -> ValidationResult:
+    def validate(
+        self,
+        data: str,
+        start_index: int = 0,
+        _indent_level: int = 0,
+        _style_config: StyleConfig | None = None,
+    ) -> ValidationResult:
         if data[start_index:] == "-":
             return ValidationResult(True, None)
         regex = r"^-?([1-9][0-9]*|0)(\.0*)?"
@@ -206,7 +237,13 @@ class NumberSchemaParser(JsonSchemaParser):
                 return (False, False)
         return (True, valid_full)
 
-    def validate(self, data: str, start_index: int = 0) -> ValidationResult:
+    def validate(
+        self,
+        data: str,
+        start_index: int = 0,
+        _indent_level: int = 0,
+        _style_config: StyleConfig | None = None,
+    ) -> ValidationResult:
         # I'm going to restrict scientific notation for now because it's a pain
         if data[start_index:] == "-":
             return ValidationResult(True, None)
@@ -262,7 +299,13 @@ class StringSchemaParser(JsonSchemaParser):
                 return True
         return False
 
-    def validate(self, data: str, start_index: int = 0) -> ValidationResult:
+    def validate(
+        self,
+        data: str,
+        start_index: int = 0,
+        _indent_level: int = 0,
+        _style_config: StyleConfig | None = None,
+    ) -> ValidationResult:
         parsed = data[start_index:]
         if not parsed.startswith('"'):
             return ValidationResult(False, None)
@@ -273,14 +316,20 @@ class StringSchemaParser(JsonSchemaParser):
             if parsed[index] == '"':
                 closed = True
                 break
+            if parsed[index] == "\n":
+                return ValidationResult(False, None)
             if parsed[index] == "\\":
+                if index + 1 < len(parsed) and parsed[index + 1] == "\n":
+                    return ValidationResult(False, None)
                 index += 1
             index += 1
             n_chars += 1
 
         if not closed:
             satisfies_length = (
-                self.max_length is None or (len(parsed) - 1) <= self.max_length
+                self.max_length is None
+                or (len(parsed) - (0 if parsed.endswith("\\") else 1))
+                <= self.max_length
             )
             satisfies_enum_partially = self.satisfies_enum_partially(parsed)
             return ValidationResult(satisfies_length and satisfies_enum_partially, None)
@@ -310,10 +359,16 @@ class AnyOfSchemaParser(JsonSchemaParser):
             )
         return None
 
-    def validate(self, data: str, start_index: int = 0) -> ValidationResult:
+    def validate(
+        self,
+        data: str,
+        start_index: int = 0,
+        indent_level: int = 0,
+        style_config: StyleConfig | None = None,
+    ) -> ValidationResult:
         valid = False
         for parser in self.any_of:
-            result = parser.validate(data, start_index)
+            result = parser.validate(data, start_index, indent_level, style_config)
             if result.valid:
                 valid = True
                 if result.end_index is not None:
@@ -337,35 +392,119 @@ class ArraySchemaParser(JsonSchemaParser):
             )
         return None
 
-    def skip_whitespace(self, data: str, start_index: int) -> int:
-        """Skip whitespace in a string"""
-        regex = r"\s*"
-        match = re.match(regex, data[start_index:])
-        if not match:
-            return start_index
-        return start_index + match.end()
+    def skip_indent(
+        self, data: str, start_index: int, indent: int | None
+    ) -> int | None:
+        """Skip indentation in a string"""
+        if indent is not None:
+            if not (" " * indent).startswith(data[start_index : start_index + indent]):
+                return None
+            return start_index + indent
+        index = start_index
+        while index < len(data) and data[index] == " ":
+            index += 1
+        return index
 
-    def validate(self, data: str, start_index: int = 0) -> ValidationResult:
+    def skip_whitespace(
+        self,
+        data: str,
+        start_index: int,
+        role: Literal["begin", "after_item", "after_sep"],
+        config: StyleConfig,
+        indent_level: int,
+        is_multiline: bool,
+    ) -> int | None:
+        """Skip whitespace in a string"""
+        item_indent_level = config.indent and indent_level + config.indent
+        if role == "begin":
+            if is_multiline:
+                return self.skip_indent(data, start_index + 1, item_indent_level)
+            return start_index
+        if role == "after_item":
+            if is_multiline and start_index < len(data):
+                if data[start_index] == "\n":
+                    if (
+                        start_index + indent_level + 1 < len(data)
+                        and data[start_index + indent_level + 1] != "]"
+                    ):
+                        return None
+                    return self.skip_indent(data, start_index + 1, indent_level)
+                if data[start_index] == "]":
+                    return None
+            if config.force_instant_comma:
+                return start_index
+            return self.skip_indent(data, start_index, None)
+        if role == "after_sep":
+            if is_multiline:
+                if start_index < len(data) and data[start_index] != "\n":
+                    return None
+                return self.skip_indent(data, start_index + 1, item_indent_level)
+            return self.skip_indent(
+                data, start_index, 1 if config.compact_objects else None
+            )
+        return None
+
+    def validate(
+        self,
+        data: str,
+        start_index: int = 0,
+        indent_level: int = 0,
+        style_config: StyleConfig | None = None,
+    ) -> ValidationResult:
         """Validate an array against a schema"""
         parsed = data[start_index:]
         if not parsed.startswith("["):
             return ValidationResult(False, None)
-        index = 1
-        while True:
-            # Skip whitespace
-            index = self.skip_whitespace(parsed, index)
+        if parsed.startswith("[]"):
+            return ValidationResult(True, start_index + 2)
+        is_multiline = parsed.startswith("[\n")
+        if (
+            len(parsed) >= 2
+            and not is_multiline
+            and style_config
+            and not style_config.max_inline_array_elements
+        ):
+            return ValidationResult(False, None)
+        index = self.skip_whitespace(
+            parsed,
+            1,
+            "begin",
+            style_config or StyleConfig(),
+            indent_level,
+            is_multiline,
+        )
+        if index is None:
+            return ValidationResult(False, None)
 
+        n_items = 0
+
+        while True:
             # If it ends here
             if index >= len(parsed):
                 return ValidationResult(True, None)
 
             # Get the item
-            result = self.items.validate(parsed, index)
+            result = self.items.validate(
+                parsed, index, indent_level + (4 if is_multiline else 0), style_config
+            )
             if not result.valid:
                 return ValidationResult(False, None)
             if result.end_index is None:
                 return ValidationResult(True, None)
             index = result.end_index
+            n_items += 1
+
+            # Skip whitespace
+            index = self.skip_whitespace(
+                parsed,
+                index,
+                "after_item",
+                style_config or StyleConfig(),
+                indent_level,
+                is_multiline,
+            )
+            if index is None:
+                return ValidationResult(False, None)
 
             # If it ends here
             if index >= len(parsed):
@@ -373,12 +512,36 @@ class ArraySchemaParser(JsonSchemaParser):
 
             # Check for end of array
             if parsed[index] == "]":
+                # If it's multiline, we expect whitespace or a newline before this
+                if is_multiline and parsed[index - 1] not in ["\n", " "]:
+                    return ValidationResult(False, None)
                 return ValidationResult(True, start_index + index + 1)
+
+            # If we got too many items still
+            if (
+                style_config
+                and not is_multiline
+                and style_config.max_inline_array_elements is not None
+                and style_config.max_inline_array_elements <= n_items
+            ):
+                return ValidationResult(False, None)
 
             # Assert comma
             if parsed[index] != ",":
                 return ValidationResult(False, None)
             index += 1
+
+            # Skip whitespace
+            index = self.skip_whitespace(
+                parsed,
+                index,
+                "after_sep",
+                style_config or StyleConfig(),
+                indent_level,
+                is_multiline,
+            )
+            if index is None:
+                return ValidationResult(False, None)
 
 
 class ObjectSchemaParser(JsonSchemaParser):
@@ -389,10 +552,12 @@ class ObjectSchemaParser(JsonSchemaParser):
         properties: dict[str, JsonSchemaParser],
         additional_properties: JsonSchemaParser | None,
         required_properties: set[str] | None,
+        enforced_order: list[str] | None = None,
     ):
         self.properties = properties
         self.additional_properties = additional_properties
         self.required_properties = required_properties
+        self.enforced_order = enforced_order
 
     @classmethod
     def load(
@@ -409,16 +574,79 @@ class ObjectSchemaParser(JsonSchemaParser):
                 additional_properties = cls.parser_for(
                     schema["additionalProperties"], recursive_parsers
                 )
-            return cls(properties, additional_properties, schema.get("required"))
+            return cls(
+                properties,
+                additional_properties,
+                schema.get("required"),
+                schema.get("enforceOrder"),
+            )
         return None
 
-    def skip_whitespace(self, data: str, start_index: int) -> int:
+    def skip_indent(
+        self, data: str, start_index: int, indent: int | None
+    ) -> int | None:
+        """Skip indentation in a string"""
+        if indent is not None:
+            if not (" " * indent).startswith(data[start_index : start_index + indent]):
+                return None
+            return start_index + indent
+        index = start_index
+        while index < len(data) and data[index] == " ":
+            index += 1
+        return index
+
+    def skip_whitespace(
+        self,
+        data: str,
+        start_index: int,
+        role: Literal[
+            "begin", "after_property", "after_colon", "after_item", "after_sep"
+        ],
+        config: StyleConfig,
+        indent_level: int,
+        is_multiline: bool,
+        needs_to_continue: bool = True,
+    ) -> int | None:
         """Skip whitespace in a string"""
-        regex = r"\s*"
-        match = re.match(regex, data[start_index:])
-        if not match:
+        item_indent_level = config.indent and indent_level + config.indent
+        if role == "begin":
+            if is_multiline:
+                return self.skip_indent(data, start_index + 1, item_indent_level)
             return start_index
-        return start_index + match.end()
+        if role == "after_property":
+            if config.compact_objects:
+                return start_index
+            return self.skip_indent(data, start_index, None)
+        if role == "after_colon":
+            if config.compact_objects:
+                return self.skip_indent(
+                    data, start_index, 1 if config.compact_objects else None
+                )
+        if role == "after_item":
+            if is_multiline and start_index < len(data):
+                if data[start_index] == "\n":
+                    if needs_to_continue:
+                        return start_index
+                    if (
+                        start_index + indent_level + 1 < len(data)
+                        and data[start_index + indent_level + 1] != "}"
+                    ):
+                        return None
+                    return self.skip_indent(data, start_index + 1, indent_level)
+                if data[start_index] == "}":
+                    return None
+            if config.force_instant_comma:
+                return start_index
+            return self.skip_indent(data, start_index, None)
+        if role == "after_sep":
+            if is_multiline:
+                if start_index < len(data) and data[start_index] != "\n":
+                    return None
+                return self.skip_indent(data, start_index + 1, item_indent_level)
+            return self.skip_indent(
+                data, start_index, 1 if config.compact_objects else None
+            )
+        return None
 
     def get_parser_for(self, property_name: str) -> JsonSchemaParser | None:
         """Get the parser for a property"""
@@ -428,33 +656,66 @@ class ObjectSchemaParser(JsonSchemaParser):
             return self.additional_properties
         return None
 
-    def validate(self, data: str, start_index: int = 0) -> ValidationResult:
+    def formulate_enum(
+        self, needed_properties: set[str], order: list[str] | None
+    ) -> list[str] | None:
+        allowed_properties: list[str] | None = (
+            list(needed_properties) if self.additional_properties is None else None
+        )
+        if not order:
+            return allowed_properties
+        return [order[0]]
+
+    def update_order(self, order: list[str] | None, property_name: str):
+        if not order:
+            return
+        if order[0] != property_name:
+            raise ValueError("Order broken")
+        del order[0]
+
+    def validate(
+        self,
+        data: str,
+        start_index: int = 0,
+        indent_level: int = 0,
+        style_config: StyleConfig | None = None,
+    ) -> ValidationResult:
         """Validate an object against a schema"""
+        needed_properties = set(self.required_properties or self.properties.keys())
+        order = self.enforced_order and list(self.enforced_order)
+
         parsed = data[start_index:]
         if not parsed.startswith("{"):
             return ValidationResult(False, None)
-        index = 1
-        needed_properties = set(self.required_properties or self.properties.keys())
+        if parsed.startswith("{}") and not needed_properties:
+            return ValidationResult(True, 2)
+        is_multiline = parsed.startswith("{\n")
+        if (
+            len(parsed) >= 2
+            and not is_multiline
+            and style_config
+            and style_config.object_multiline_treshold is not None
+            and len(needed_properties) > style_config.object_multiline_treshold
+        ):
+            return ValidationResult(False, None)
+        index = self.skip_whitespace(
+            parsed,
+            1,
+            "begin",
+            style_config or StyleConfig(),
+            indent_level,
+            is_multiline,
+        )
+        if index is None:
+            return ValidationResult(False, None)
         while True:
-            # Skip whitespace
-            index = self.skip_whitespace(parsed, index)
-
             # If it ends here
             if index >= len(parsed):
                 return ValidationResult(True, None)
 
-            # Check for end of object
-            if parsed[index] == "}":
-                # Did we cover all required properties?
-                if needed_properties:
-                    return ValidationResult(False, None)
-                return ValidationResult(True, start_index + index + 1)
-
             # Get the property name
             result = StringSchemaParser(
-                None,
-                None,
-                list(needed_properties) if self.additional_properties is None else None,
+                None, None, self.formulate_enum(needed_properties, order)
             ).validate(parsed, index)
             if not result.valid:
                 return ValidationResult(False, None)
@@ -467,7 +728,16 @@ class ObjectSchemaParser(JsonSchemaParser):
             index = result.end_index
 
             # Skip whitespace
-            index = self.skip_whitespace(parsed, index)
+            index = self.skip_whitespace(
+                parsed,
+                index,
+                "after_property",
+                style_config or StyleConfig(),
+                indent_level,
+                is_multiline,
+            )
+            if index is None:
+                return ValidationResult(False, None)
 
             # If it ends here
             if index >= len(parsed):
@@ -479,7 +749,16 @@ class ObjectSchemaParser(JsonSchemaParser):
             index += 1
 
             # Skip whitespace
-            index = self.skip_whitespace(parsed, index)
+            index = self.skip_whitespace(
+                parsed,
+                index,
+                "after_colon",
+                style_config or StyleConfig(),
+                indent_level,
+                is_multiline,
+            )
+            if index is None:
+                return ValidationResult(False, None)
 
             # If it ends here
             if index >= len(parsed):
@@ -491,7 +770,9 @@ class ObjectSchemaParser(JsonSchemaParser):
                 return ValidationResult(False, None)
 
             # Validate the property
-            result = parser.validate(parsed, index)
+            result = parser.validate(
+                parsed, index, indent_level + (4 if is_multiline else 0), style_config
+            )
             if not result.valid:
                 return ValidationResult(False, None)
             if result.end_index is None:
@@ -501,9 +782,20 @@ class ObjectSchemaParser(JsonSchemaParser):
             # Update the used properties
             if property_name in needed_properties:
                 needed_properties.remove(property_name)
+                self.update_order(order, property_name)
 
             # Skip whitespace
-            index = self.skip_whitespace(parsed, index)
+            index = self.skip_whitespace(
+                parsed,
+                index,
+                "after_item",
+                style_config or StyleConfig(),
+                indent_level,
+                is_multiline,
+                bool(needed_properties),
+            )
+            if index is None:
+                return ValidationResult(False, None)
 
             # If it ends here
             if index >= len(parsed):
@@ -524,6 +816,18 @@ class ObjectSchemaParser(JsonSchemaParser):
             if parsed[index] != ",":
                 return ValidationResult(False, None)
             index += 1
+
+            # Skip whitespace
+            index = self.skip_whitespace(
+                parsed,
+                index,
+                "after_sep",
+                style_config or StyleConfig(),
+                indent_level,
+                is_multiline,
+            )
+            if index is None:
+                return ValidationResult(False, None)
 
 
 default_parsers: list[Type[JsonSchemaParser]] = [
