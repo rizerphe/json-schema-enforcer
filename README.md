@@ -1,9 +1,73 @@
 # JSON schema enforcer
 
-A progressive JSON schema validator. For use with large language models, to force their output to strictly adhere to a pre-defined schema. The goal is to be able to validate whether the partial JSON output breaks the schema, in a way where you can't get yourself into a dead end - if "...ab" is valid, then there is an x for which "...abx" is valid, all the way until you got the complete output.
+## Table of Contents
 
-This is a quick experiment to show how easy it is to implement a JSON schema enforcer. I made it out of spite after OpenAI didn't enforce the schema of the returns of the function call feature, and I made it in a day, which does prove my point - OpenAI *could* have done this, they just didn't bother.
+- [Introduction](#introduction)
+- [Key Features](#key-features)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Example JSON Schema](#example-json-schema)
+- [Potential Use Cases](#potential-use-cases)
 
-Note that I am not a programming language developer, not at all, therefore I fully expect this code to be _very shitty._
+## Introduction
 
-Another note: I am not using the full JSON schema specification, but my own simplified standard similar to the one OpenAI use.
+json-schema-enforcer is a Python package that allows you to progressively validate a JSON string against a JSON schema. With this package, you can check if a JSON string adheres to the schema and if it is complete, even if the string is not fully formed. This is particularly useful when working with large language models to constraint text generation.
+
+This project was created out of spite for the lack of a similar feature in [OpenAI ChatGPT's function calling](https://openai.com/blog/function-calling-and-other-api-updates), to prove that creating something like this is very easy. It uses the simplified JSON schema specification, similar to what OpenAI does. Please note that the code implementation probably does not adhere to best practices, as it is primarily an experimental showcase by someone who isn't skilled in creating programming language parsers.
+
+## Key Features
+
+- Parses a JSON schema and validates a string against it
+- Determines if the returned JSON is valid (matches the schema and optional formatting)
+- Determines if the JSON string is complete and provides the index of the last character
+
+## Installation
+
+You can install json-schema-enforcer using pip:
+
+```shell
+pip install json-schema-enforcer
+```
+
+## Usage
+
+To use json-schema-enforcer in your Python project, follow these steps:
+
+```python
+import json_schema_enforcer
+
+# Parse the schema
+parser = json_schema_enforcer.parser_for_schema(schema)
+
+# Check if the parser is valid
+if parser is None:
+    raise ValueError("Invalid JSON schema")
+
+# Validate the JSON string
+validated = parser.validate(maybe_json_string)
+
+# Print the validation result
+print(validated.valid)  # Whether it adheres to the schema
+print("complete" if validated.end_index else "incomplete")
+```
+
+## Example JSON Schema
+
+You can use the following example JSON schema as a reference when working with json-schema-enforcer:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": { "type": "string", "maxLength": 20 },
+    "age": { "type": "integer" },
+    "preferred_animal": { "type": "string", "enum": ["cat", "dog"] }
+  },
+  "required": ["name", "age"]
+}
+```
+
+## Potential Use Cases
+
+- Constraining text generation with large language models; example: [local-llm-function-calling](https://github.com/rizerphe/local-llm-function-calling), a project that allows you to constrain generation with any huggingface model
+
