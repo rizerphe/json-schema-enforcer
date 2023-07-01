@@ -123,7 +123,8 @@ class IntegerSchemaParser(JsonSchemaParser):
         regex = r"^-?([1-9][0-9]*|0)(\.0*)?"
         match = re.match(regex, data[start_index:])
         if match:
-            return ValidationResult(True, start_index + match.end())
+            # TODO: limit the actual number, not just the length
+            return ValidationResult(True, start_index + min(match.end(), 10))
         return ValidationResult(False, None)
 
 
@@ -165,15 +166,17 @@ class NumberSchemaParser(JsonSchemaParser):
         """Return all multiples between the maximum and minimum"""
         if self.multiple_of is None:
             return []
-        maximum = (
+        maximum = min(
             self.maximum
             or number * (10 * 10 ** int(math.log10(self.multiple_of)))
-            + self.multiple_of
-        )
-        minimum = (
+            + self.multiple_of,
+            1000000000000000000000000,
+        )  # We are limiting it to 16 digits because of floating point precision
+        minimum = min(
             self.minimum
             or number * (10 * 10 ** int(math.log10(self.multiple_of)))
-            - self.multiple_of
+            - self.multiple_of,
+            -1000000000000000000000000,
         )
         if maximum is None or minimum is None:
             return
@@ -262,9 +265,10 @@ class NumberSchemaParser(JsonSchemaParser):
         _style_config: StyleConfig | None = None,
     ) -> ValidationResult:
         # I'm going to restrict scientific notation for now because it's a pain
+        # TODO: scientific notation + proper non-length-based limiting
         if data[start_index:] == "-":
             return ValidationResult(self.allowed_negative(), None)
-        regex = r"-?([1-9][0-9]*|0)(\.[0-9]*)?"
+        regex = r"-?([1-9][0-9]{0,16}|0)(\.[0-9]{1,16})?"
         match = re.match(regex, data[start_index:])
         if not match:
             return ValidationResult(False, None)
